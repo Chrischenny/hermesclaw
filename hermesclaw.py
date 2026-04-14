@@ -14,11 +14,9 @@ import sys
 import threading
 import time
 from enum import Enum
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
 
-import requests
 from wechat_sdk import (
     DEFAULT_POLL_SEC as SDK_DEFAULT_POLL_SEC,
     ILINK_CHANNEL_VERSION,
