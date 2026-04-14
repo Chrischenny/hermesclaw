@@ -58,14 +58,16 @@ def build_ilink_headers(token: str, body: str | bytes = "") -> dict[str, str]:
         - Caller can pass empty token for unauthenticated scenarios in tests.
     """
     body_size = len(body if isinstance(body, bytes) else body.encode())
-    return {
+    headers = {
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
         "Content-Length": str(body_size),
         "iLink-App-Id": "",
         "iLink-App-ClientVersion": ILINK_CLIENT_VERSION,
-        "Authorization": (f"Bearer {token}" if token else ""),
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 class ILinkClient:
@@ -197,7 +199,7 @@ def make_gateway_proxy_handler(
         - Non-allowlisted endpoints: 404 with normalized JSON error payload.
     """
 
-    class GatewayProxyHandler(BaseHTTPRequestHandler):
+    class ILinkGatewayProxyHandler(BaseHTTPRequestHandler):
         """Concrete request handler bound to one queue+client instance."""
 
         def do_POST(self):
@@ -312,4 +314,4 @@ def make_gateway_proxy_handler(
             # Silence BaseHTTPRequestHandler default logs; app logger is enough.
             pass
 
-    return GatewayProxyHandler
+    return ILinkGatewayProxyHandler

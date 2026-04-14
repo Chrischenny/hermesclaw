@@ -13,6 +13,7 @@ import signal
 import sys
 import threading
 import time
+from functools import lru_cache
 from enum import Enum
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -177,6 +178,7 @@ def hdrs(tok, body=""):
     return build_ilink_headers(tok, body)
 
 
+@lru_cache(maxsize=8)
 def _client(base_url, tok):
     """Build SDK client with project-level protocol defaults."""
     return ILinkClient(
