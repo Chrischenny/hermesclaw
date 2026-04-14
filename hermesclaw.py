@@ -170,7 +170,10 @@ def cmd(state, uid, text):
 
 
 def hdrs(tok, body=""):
-    """Backward-compatible wrapper around SDK header builder."""
+    """Backward-compatible wrapper around SDK header builder.
+
+    New code should use `wechat_sdk.build_ilink_headers` directly.
+    """
     return build_ilink_headers(tok, body)
 
 

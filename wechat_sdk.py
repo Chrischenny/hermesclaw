@@ -43,12 +43,12 @@ PROXY_ALLOWLIST = frozenset([
 ])
 
 
-def build_ilink_headers(token: str, body: str = "") -> dict[str, str]:
+def build_ilink_headers(token: str, body: str | bytes = "") -> dict[str, str]:
     """Build standard iLink HTTP headers.
 
     Args:
         token: iLink bot token used in Authorization header.
-        body: JSON payload text; used to compute Content-Length precisely.
+        body: JSON payload text/bytes; used to compute Content-Length precisely.
 
     Returns:
         A header dictionary that follows iLink gateway expectations.
@@ -57,13 +57,14 @@ def build_ilink_headers(token: str, body: str = "") -> dict[str, str]:
         - Content-Length is calculated from UTF-8 encoded bytes.
         - Caller can pass empty token for unauthenticated scenarios in tests.
     """
+    body_size = len(body if isinstance(body, bytes) else body.encode())
     return {
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
-        "Content-Length": str(len(body.encode())),
+        "Content-Length": str(body_size),
         "iLink-App-Id": "",
         "iLink-App-ClientVersion": ILINK_CLIENT_VERSION,
-        "Authorization": "Bearer " + token if token else "",
+        "Authorization": (f"Bearer {token}" if token else ""),
     }
 
 
@@ -110,13 +111,7 @@ class ILinkClient:
         url = self.base_url + "/" + endpoint.lstrip("/")
         return requests.post(
             url,
-            headers={
-                "Content-Type": "application/json",
-                "AuthorizationType": "ilink_bot_token",
-                "iLink-App-Id": "",
-                "iLink-App-ClientVersion": ILINK_CLIENT_VERSION,
-                "Authorization": "Bearer " + self.token,
-            },
+            headers=build_ilink_headers(self.token, body),
             data=body,
             timeout=timeout,
         )
@@ -313,7 +308,7 @@ def make_gateway_proxy_handler(
             self.end_headers()
             self.wfile.write(data)
 
-        def log_message(self, format, *args):  # noqa: A003
+        def log_message(self, fmt, *args):
             # Silence BaseHTTPRequestHandler default logs; app logger is enough.
             pass
 
