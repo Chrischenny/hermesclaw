@@ -9,27 +9,34 @@ directly to the iLink API.
 import json
 import logging
 import os
-import secrets
 import signal
 import sys
 import threading
 import time
+from functools import lru_cache
 from enum import Enum
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
 
-import requests
+from wechat_sdk import (
+    DEFAULT_POLL_SEC as SDK_DEFAULT_POLL_SEC,
+    ILINK_CHANNEL_VERSION,
+    ILINK_CLIENT_VERSION,
+    PROXY_ALLOWLIST,
+    ILinkClient,
+    build_ilink_headers,
+    make_gateway_proxy_handler,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 T, VO = 1, 3  # iLink message types: text, voice
-ILINK_VER = "2.1.7"
-ILINK_CV = "65547"
+ILINK_VER = ILINK_CHANNEL_VERSION
+ILINK_CV = ILINK_CLIENT_VERSION
 QUEUE_CAP = 200
-DEFAULT_POLL_SEC = 35
+DEFAULT_POLL_SEC = SDK_DEFAULT_POLL_SEC
 
 log = logging.getLogger("hermesclaw")
 
@@ -164,59 +171,40 @@ def cmd(state, uid, text):
 
 
 def hdrs(tok, body=""):
-    return {
-        "Content-Type": "application/json",
-        "AuthorizationType": "ilink_bot_token",
-        "Content-Length": str(len(body.encode())),
-        "iLink-App-Id": "",
-        "iLink-App-ClientVersion": ILINK_CV,
-        "Authorization": "Bearer " + tok if tok else "",
-    }
+    """Backward-compatible wrapper around SDK header builder.
+
+    New code should use `wechat_sdk.build_ilink_headers` directly.
+    """
+    return build_ilink_headers(tok, body)
+
+
+@lru_cache(maxsize=8)
+def _client(base_url, tok):
+    """Build SDK client with project-level protocol defaults."""
+    return ILinkClient(
+        base_url=base_url,
+        token=tok,
+        channel_version=ILINK_VER,
+        default_poll_sec=DEFAULT_POLL_SEC,
+    )
 
 
 def ilink_post(base_url, ep, bd, tok, to=30):
-    url = base_url.rstrip("/") + "/" + ep.lstrip("/")
-    bs = json.dumps(bd)
-    r = requests.post(url, headers=hdrs(tok, bs), data=bs.encode(), timeout=to)
-    r.raise_for_status()
-    return r.json()
+    """Backward-compatible wrapper to keep test and caller imports stable."""
+    return _client(base_url, tok).post(ep, bd, timeout=to)
 
 
 def get_updates_real(base_url, tok, buf="", to=None):
-    if to is None:
-        to = DEFAULT_POLL_SEC
-    try:
-        return ilink_post(
-            base_url,
-            "ilink/bot/getupdates",
-            {"get_updates_buf": buf, "base_info": {"channel_version": ILINK_VER}},
-            tok,
-            to + 5,  # HTTP timeout slightly longer than iLink long-poll
-        )
-    except requests.exceptions.Timeout:
-        return {"ret": 0, "msgs": [], "get_updates_buf": buf}
-    except Exception as e:
-        log.warning("getUpdates: %s", e)
-        return {"ret": -1, "msgs": [], "get_updates_buf": buf}
+    """Backward-compatible wrapper for SDK long-poll call."""
+    return _client(base_url, tok).get_updates(cursor=buf, poll_sec=to)
 
 
 def send_text_ilink(base_url, tok, to_user, text, ctx=None):
-    """Send a plain text reply through iLink."""
-    m = {
-        "from_user_id": "",
-        "to_user_id": to_user,
-        "client_id": "hc-" + secrets.token_hex(8),
-        "message_type": 2,
-        "message_state": 2,
-        "item_list": [{"type": T, "text_item": {"text": text}}],
-    }
-    if ctx:
-        m["context_token"] = ctx
-    return ilink_post(
-        base_url,
-        "ilink/bot/sendmessage",
-        {"msg": m, "base_info": {"channel_version": ILINK_VER}},
-        tok,
+    """Backward-compatible wrapper for SDK send_text."""
+    return _client(base_url, tok).send_text(
+        to_user_id=to_user,
+        text=text,
+        context_token=ctx,
     )
 
 
@@ -257,157 +245,25 @@ class MessageQueue:
             return len(self.msgs)
 
 
-# ---------------------------------------------------------------------------
-# Gateway proxy handler
-# ---------------------------------------------------------------------------
-
-PROXY_ALLOWLIST = frozenset([
-    "ilink/bot/getupdates",
-    "ilink/bot/sendmessage",
-    "ilink/bot/getuploadurl",
-    "ilink/bot/sendtyping",
-    "ilink/bot/getconfig",
-    "ilink/bot/get_bot_qrcode",
-    "ilink/bot/get_qrcode_status",
-])
-
-
 def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
-    """Factory: create a request handler class bound to a specific queue.
+    """Factory wrapper: keep legacy interface while delegating to SDK."""
+    client = _client(ilink_base_url, ilink_token)
 
-    *state* -- State instance for route lookup.
-    *tag*   -- e.g. "[Hermes Agent]"; prepended to text items in
-    sendmessage when the destination user's route is /both.
-    """
+    def should_tag_text(to_user):
+        """Tag only when current route is BOTH for the destination user."""
+        try:
+            return state.get(to_user) == Route.BOTH
+        except Exception:
+            return False
 
-    class GatewayProxyHandler(BaseHTTPRequestHandler):
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else b""
-            ep = urlparse(self.path).path.lstrip("/")
-
-            if ep not in PROXY_ALLOWLIST:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b'{"ret":-1,"errmsg":"not allowed"}')
-                log.warning("Proxy blocked: %s", ep)
-                return
-
-            try:
-                if ep == "ilink/bot/getupdates":
-                    self._handle_getupdates(body)
-                elif ep == "ilink/bot/sendmessage":
-                    self._handle_sendmessage(body)
-                else:
-                    self._proxy_passthrough(body)
-            except BrokenPipeError:
-                log.debug("Client disconnected (BrokenPipeError)")
-            except ConnectionResetError:
-                log.debug("Client disconnected (ConnectionResetError)")
-
-        # -- getupdates: return from queue with long-poll ----------------
-
-        def _handle_getupdates(self, body):
-            try:
-                bd = json.loads(body) if body else {}
-            except Exception:
-                bd = {}
-            client_buf = bd.get("get_updates_buf", "")
-
-            msgs = queue.dequeue_all(timeout=DEFAULT_POLL_SEC)
-            resp = {"ret": 0, "msgs": msgs, "get_updates_buf": client_buf}
-            self._write_json(200, resp)
-            if msgs:
-                log.info("Proxy [%s] getupdates -> %d msgs", tag or "?", len(msgs))
-
-        # -- sendmessage: forward to real iLink with optional tagging ----
-
-        def _handle_sendmessage(self, body):
-            try:
-                bd = json.loads(body) if body else {}
-            except Exception:
-                bd = {}
-
-            # Tag text items only in /both mode for attribution.
-            if tag:
-                msg_obj = bd.get("msg", {})
-                to_user = msg_obj.get("to_user_id", "")
-                try:
-                    route = state.get(to_user) if to_user else Route.HERMES
-                except Exception:
-                    route = Route.HERMES
-                if route == Route.BOTH:
-                    for item in msg_obj.get("item_list", []):
-                        if item.get("type") == T:
-                            ti = item.get("text_item", {})
-                            original = ti.get("text", "")
-                            if original:
-                                ti["text"] = f"{tag} {original}"
-
-            self._forward_to_ilink(
-                "ilink/bot/sendmessage",
-                json.dumps(bd).encode() if bd else body,
-            )
-
-        # -- other endpoints: passthrough to real iLink ------------------
-
-        def _proxy_passthrough(self, body):
-            ep = urlparse(self.path).path.lstrip("/")
-            self._forward_to_ilink(ep, body)
-
-        def _forward_to_ilink(self, ep, body):
-            url = ilink_base_url.rstrip("/") + "/" + ep
-            try:
-                resp = requests.post(
-                    url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "AuthorizationType": "ilink_bot_token",
-                        "iLink-App-Id": "",
-                        "iLink-App-ClientVersion": ILINK_CV,
-                        "Authorization": "Bearer " + ilink_token,
-                    },
-                    data=body,
-                    timeout=30,
-                )
-                self.send_response(resp.status_code)
-                for k, v in resp.headers.items():
-                    if k.lower() not in (
-                        "transfer-encoding", "content-encoding", "connection",
-                    ):
-                        self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(resp.content)
-            except BrokenPipeError:
-                # Gateway disconnected before we could write back the response.
-                # The upstream request already succeeded; nothing to retry.
-                log.debug("BrokenPipe on write-back (benign): %s", ep)
-            except Exception as e:
-                log.error("Proxy forward error: %s", e)
-                try:
-                    err = json.dumps({"ret": -1, "errmsg": str(e)}).encode()
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err)))
-                    self.end_headers()
-                    self.wfile.write(err)
-                except BrokenPipeError:
-                    log.debug("BrokenPipe writing error response (benign)")
-
-
-        def _write_json(self, code, obj):
-            data = json.dumps(obj).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, format, *args):
-            pass  # Suppress default HTTP log noise.
-
-    return GatewayProxyHandler
+    return make_gateway_proxy_handler(
+        queue=queue,
+        client=client,
+        tag=tag,
+        should_tag_text=should_tag_text,
+        allowlist=PROXY_ALLOWLIST,
+        poll_sec=DEFAULT_POLL_SEC,
+    )
 
 
 # ---------------------------------------------------------------------------

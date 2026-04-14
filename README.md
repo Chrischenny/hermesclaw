@@ -77,6 +77,8 @@ HermesClaw solves this by becoming the **sole iLink poller**, then running two l
 
 HermesClaw is a thin Python proxy (~500 lines). It does **not** process media, call agent APIs, or touch agent memory. It just queues and forwards raw iLink protocol messages. Each gateway handles its own media decryption, markdown formatting, and AI interaction natively.
 
+As of current architecture, the WeChat/iLink communication layer is extracted into `wechat_sdk.py` so transport details (headers, long-poll, sendmessage, proxy passthrough) are encapsulated and reusable.
+
 HermesClaw 只是一个轻量转发代理（~500 行），不处理媒体、不调 Agent API、不动记忆。每个 Gateway 原生处理自己的媒体解密和 AI 交互。
 
 ---
@@ -153,6 +155,7 @@ Default route is **Hermes**. In `/both` mode, replies are prefixed with `[Hermes
 
 ```text
 hermesclaw.py             # ~500 lines. Dual-proxy router.
+wechat_sdk.py             # WeChat/iLink communication SDK (transport + proxy handler).
 install.sh                # Smart auto-detecting installer.
 fix_hermes_splitting.sh   # Patch Hermes weixin.py (optional, recommended).
 tests/                    # 59 pytest tests (core, proxy, recovery).
